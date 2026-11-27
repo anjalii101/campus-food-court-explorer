@@ -20,7 +20,7 @@ class CampusFoodcourtApplicationTests extends AbstractIntegrationTest {
 	void flywayAppliedAllMigrations() {
 		assertThat(flyway.info().pending()).isEmpty();
 		assertThat(flyway.info().applied()).extracting(m -> m.getVersion().getVersion())
-				.containsExactly("1", "2", "3");
+				.containsExactly("1", "2", "3", "4", "5", "6");
 	}
 
 }
