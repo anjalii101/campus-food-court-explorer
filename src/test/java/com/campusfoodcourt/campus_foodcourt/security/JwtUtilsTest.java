@@ -50,7 +50,7 @@ class JwtUtilsTest {
 
     @Test
     void generatedTokenIsHs256WithIssuerTypeSubjectAndFifteenMinuteLifetime() {
-        String token = jwtUtils.generateToken(EMAIL);
+        String token = jwtUtils.generateToken(EMAIL, 0);
 
         var jws = Jwts.parser().verifyWith(key).clock(this::now).build().parseSignedClaims(token);
         assertThat(jws.getHeader().getAlgorithm()).isEqualTo("HS256");
@@ -64,7 +64,7 @@ class JwtUtilsTest {
 
     @Test
     void validTokenYieldsTheEmail() {
-        assertThat(jwtUtils.extractVerifiedEmail(jwtUtils.generateToken(EMAIL))).isEqualTo(EMAIL);
+        assertThat(jwtUtils.extractVerifiedEmail(jwtUtils.generateToken(EMAIL, 0))).isEqualTo(EMAIL);
     }
 
     @ParameterizedTest(name = "{0}-byte key")
@@ -73,7 +73,7 @@ class JwtUtilsTest {
         // Keys.hmacShaKeyFor names a 48-byte key "HmacSHA384" and a 64-byte key "HmacSHA512";
         // HS256 must still be used for signing (the .env.example suggests 48 bytes).
         JwtUtils utils = jwtUtils(java.util.Arrays.copyOf(KEY_BYTES, keyLength), clock);
-        String token = utils.generateToken(EMAIL);
+        String token = utils.generateToken(EMAIL, 0);
         assertThat(header(token)).contains("\"alg\":\"HS256\"");
         assertThat(utils.extractVerifiedEmail(token)).isEqualTo(EMAIL);
     }
@@ -84,13 +84,13 @@ class JwtUtilsTest {
     void tokenSignedWithAnotherKeyIsRejected() {
         byte[] otherKey = "another-key-of-thirty-two-bytes!another-key-of-thirty-two-bytes!"
                 .getBytes(StandardCharsets.US_ASCII);
-        String foreign = jwtUtils(otherKey, clock).generateToken(EMAIL);
+        String foreign = jwtUtils(otherKey, clock).generateToken(EMAIL, 0);
         assertThatThrownBy(() -> jwtUtils.extractVerifiedEmail(foreign)).isInstanceOf(SignatureException.class);
     }
 
     @Test
     void tamperedPayloadIsRejected() {
-        String[] parts = jwtUtils.generateToken(EMAIL).split("\\.");
+        String[] parts = jwtUtils.generateToken(EMAIL, 0).split("\\.");
         String forgedPayload = b64url("{\"iss\":\"campus-foodcourt\",\"token_type\":\"access\","
                 + "\"sub\":\"admin@campus.test\",\"exp\":" + (clock.instant().getEpochSecond() + 600) + "}");
         String tampered = parts[0] + "." + forgedPayload + "." + parts[2];
@@ -101,7 +101,7 @@ class JwtUtilsTest {
 
     @Test
     void tokenIsValidJustBeforeAndRejectedJustAfterItsExpiry() {
-        String token = jwtUtils.generateToken(EMAIL);
+        String token = jwtUtils.generateToken(EMAIL, 0);
 
         clock.advance(Duration.ofMinutes(15).minusSeconds(1)); // 1 s before exp
         assertThat(jwtUtils.extractVerifiedEmail(token)).isEqualTo(EMAIL);
@@ -134,7 +134,7 @@ class JwtUtilsTest {
     @Test
     void issuerFromConfigurationIsUsedForGenerationAndValidation() {
         JwtUtils otherIssuer = new JwtUtils(new JwtProperties(base64(KEY_BYTES), FIFTEEN_MINUTES_MS, "other"), clock);
-        String token = otherIssuer.generateToken(EMAIL);
+        String token = otherIssuer.generateToken(EMAIL, 0);
         assertThat(otherIssuer.extractVerifiedEmail(token)).isEqualTo(EMAIL);
         assertThatThrownBy(() -> jwtUtils.extractVerifiedEmail(token)).isInstanceOf(IncorrectClaimException.class);
     }
@@ -200,16 +200,58 @@ class JwtUtilsTest {
 
     @Test
     void handCraftedAlgNoneWithStrippedSignatureIsRejected() {
-        String[] parts = jwtUtils.generateToken(EMAIL).split("\\.");
+        String[] parts = jwtUtils.generateToken(EMAIL, 0).split("\\.");
         String noneToken = b64url("{\"alg\":\"none\"}") + "." + parts[1] + ".";
         assertThatThrownBy(() -> jwtUtils.extractVerifiedEmail(noneToken)).isInstanceOf(JwtException.class);
     }
 
     @Test
     void headerClaimingHs512OnAnHs256SignatureIsRejected() {
-        String[] parts = jwtUtils.generateToken(EMAIL).split("\\.");
+        String[] parts = jwtUtils.generateToken(EMAIL, 0).split("\\.");
         String relabelled = b64url("{\"alg\":\"HS512\"}") + "." + parts[1] + "." + parts[2];
         assertThatThrownBy(() -> jwtUtils.extractVerifiedEmail(relabelled)).isInstanceOf(JwtException.class);
+    }
+
+    // ------------------------------------------------------------------ token version
+
+    @ParameterizedTest(name = "version {0}")
+    @ValueSource(longs = {0, 1, 7, Integer.MAX_VALUE + 1L, Long.MAX_VALUE})
+    void tokenVersionIsIssuedAndReturnedExactly(long version) {
+        String token = jwtUtils.generateToken(EMAIL, version);
+        assertThat(jwtUtils.verify(token)).isEqualTo(new JwtUtils.VerifiedAccessToken(EMAIL, version));
+    }
+
+    @Test
+    void handSignedTokenWithAllRequiredClaimsIsAccepted() {
+        // Positive control for the hand-signed negative tests: valid() alone passes.
+        assertThat(jwtUtils.verify(sign(this::valid))).isEqualTo(new JwtUtils.VerifiedAccessToken(EMAIL, 0));
+    }
+
+    @Test
+    void tokenWithoutVersionIsRejected() {
+        // e.g. an access token issued before the token version existed: refused, so the client refreshes.
+        String token = sign(this::validWithoutVersion);
+        assertThatThrownBy(() -> jwtUtils.verify(token))
+                .isInstanceOf(MalformedJwtException.class).hasMessageContaining("token version");
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"negative", "fraction", "text", "boolean"})
+    void tokenWithInvalidVersionIsRejected(String kind) {
+        Object value = switch (kind) {
+            case "negative" -> -1;
+            case "fraction" -> 1.5;
+            case "text" -> "1";
+            default -> true;
+        };
+        String token = sign(b -> validWithoutVersion(b).claim(JwtUtils.TOKEN_VERSION_CLAIM, value));
+        assertThatThrownBy(() -> jwtUtils.verify(token))
+                .isInstanceOf(MalformedJwtException.class).hasMessageContaining("token version");
+    }
+
+    @Test
+    void negativeVersionCannotBeIssued() {
+        assertThatThrownBy(() -> jwtUtils.generateToken(EMAIL, -1)).isInstanceOf(IllegalArgumentException.class);
     }
 
     // ------------------------------------------------------------------ helpers
@@ -219,6 +261,12 @@ class JwtUtilsTest {
     }
 
     private io.jsonwebtoken.JwtBuilder valid(io.jsonwebtoken.JwtBuilder b) {
+        return b.issuer(ISSUER).subject(EMAIL).claim(JwtUtils.TOKEN_TYPE_CLAIM, "access")
+                .claim(JwtUtils.TOKEN_VERSION_CLAIM, 0).expiration(inMinutes(5));
+    }
+
+    /** Like {@link #valid} but without the token-version claim. */
+    private io.jsonwebtoken.JwtBuilder validWithoutVersion(io.jsonwebtoken.JwtBuilder b) {
         return b.issuer(ISSUER).subject(EMAIL).claim(JwtUtils.TOKEN_TYPE_CLAIM, "access").expiration(inMinutes(5));
     }
 

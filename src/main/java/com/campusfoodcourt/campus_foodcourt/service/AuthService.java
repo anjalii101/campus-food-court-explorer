@@ -5,6 +5,7 @@ import com.campusfoodcourt.campus_foodcourt.auth.JwtProperties;
 import com.campusfoodcourt.campus_foodcourt.auth.RefreshTokenService;
 import com.campusfoodcourt.campus_foodcourt.dto.AuthRequest;
 import com.campusfoodcourt.campus_foodcourt.dto.AuthResponse;
+import com.campusfoodcourt.campus_foodcourt.entity.AccountStatus;
 import com.campusfoodcourt.campus_foodcourt.entity.User;
 import com.campusfoodcourt.campus_foodcourt.exception.EmailAlreadyInUseException;
 import com.campusfoodcourt.campus_foodcourt.exception.ResourceNotFoundException;
@@ -69,6 +70,7 @@ public class AuthService {
         }
         user.setPassword(passwordEncoder.encode(user.getPassword()));  // BCrypt: no transaction/connection held
         user.setRole(DEFAULT_ROLE);
+        user.setAccountStatus(AccountStatus.ACTIVE);
 
         return transactionTemplate.execute(status -> {
             User saved;
@@ -81,7 +83,7 @@ public class AuthService {
                 }
                 throw e;
             }
-            return issueTokens(saved);
+            return issueTokens(saved, saved.getTokenVersion()); // a new user starts at version 0
         });
     }
 
@@ -90,10 +92,27 @@ public class AuthService {
         Optional<User> found = userRepository.findByEmail(normaliseEmail(req.getEmail())); // short read
         String hash = found.map(User::getPassword).orElse(dummyPasswordHash);
         boolean passwordMatches = passwordEncoder.matches(req.getPassword(), hash);        // no connection held
-        if (found.isEmpty() || !passwordMatches) {
+        // Inactive accounts get exactly the same failure as a wrong password (and only after the BCrypt check),
+        // so the response reveals nothing about the account's status.
+        if (found.isEmpty() || !passwordMatches || !found.get().isActive()) {
             throw new BadCredentialsException("Invalid credentials");
         }
-        return transactionTemplate.execute(status -> issueTokens(found.get()));
+        return transactionTemplate.execute(status -> {
+            // Re-checked under a share lock on the user row (lock order: user, then tokens): a concurrent
+            // deactivation either commits first, and this login is refused, or waits for this transaction and
+            // then revokes the session created here.
+            Long userId = found.get().getId();
+            User user = userRepository.findByIdForShare(userId)
+                    .orElseThrow(() -> new BadCredentialsException("Invalid credentials"));
+            // Status read from the database under the lock, not from entity state (see RefreshTokenService).
+            if (userRepository.findAccountStatusById(userId).orElse(null) != AccountStatus.ACTIVE) {
+                throw new BadCredentialsException("Invalid credentials");
+            }
+            // Likewise the token version: a deactivation cannot change it while this lock is held.
+            long tokenVersion = userRepository.findTokenVersionById(userId)
+                    .orElseThrow(() -> new BadCredentialsException("Invalid credentials"));
+            return issueTokens(user, tokenVersion);
+        });
     }
 
 
@@ -107,7 +126,7 @@ public class AuthService {
         RefreshOutcome outcome = transactionTemplate.execute(status -> {
             try {
                 RefreshTokenService.Rotation rotation = refreshTokenService.rotate(refreshToken);
-                String accessToken = jwtUtils.generateToken(rotation.email());
+                String accessToken = jwtUtils.generateToken(rotation.email(), rotation.tokenVersion());
                 return RefreshOutcome.success(new AuthResponse(accessToken, TOKEN_TYPE, accessTokenTtlSeconds,
                         rotation.next().rawToken(), rotation.next().expiresAt()));
             } catch (InvalidRefreshTokenException e) {
@@ -135,9 +154,9 @@ public class AuthService {
 
 
     /** Must run inside a transaction; the access token is minted before commit. */
-    private AuthResponse issueTokens(User user) {
+    private AuthResponse issueTokens(User user, long tokenVersion) {
         RefreshTokenService.IssuedToken refresh = refreshTokenService.issueForNewSession(user);
-        String accessToken = jwtUtils.generateToken(user.getEmail());
+        String accessToken = jwtUtils.generateToken(user.getEmail(), tokenVersion);
         return new AuthResponse(accessToken, TOKEN_TYPE, accessTokenTtlSeconds, refresh.rawToken(),
                 refresh.expiresAt());
     }

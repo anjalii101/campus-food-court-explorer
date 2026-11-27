@@ -10,6 +10,8 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -26,7 +28,7 @@ class AuthFailureSafetyTest extends AbstractAuthApiTest {
     void failedAccessTokenDuringRefreshLeavesOldTokenValid() throws Exception {
         Session session = newSession();
         UUID family = family(session.refreshToken());
-        doThrow(new IllegalStateException("signing failed")).when(jwtUtils).generateToken(session.email());
+        doThrow(new IllegalStateException("signing failed")).when(jwtUtils).generateToken(eq(session.email()), anyLong());
 
         assertThatThrownBy(() -> refresh(session.refreshToken())).hasRootCauseMessage("signing failed");
 
@@ -40,7 +42,7 @@ class AuthFailureSafetyTest extends AbstractAuthApiTest {
     @Test
     void failedAccessTokenDuringRegistrationCreatesNoUser() throws Exception {
         String email = uniqueEmail();
-        doThrow(new IllegalStateException("signing failed")).when(jwtUtils).generateToken(email);
+        doThrow(new IllegalStateException("signing failed")).when(jwtUtils).generateToken(eq(email), anyLong());
 
         assertThatThrownBy(() -> register("Ghost", email, PASSWORD)).hasRootCauseMessage("signing failed");
 
@@ -53,7 +55,7 @@ class AuthFailureSafetyTest extends AbstractAuthApiTest {
     void failedAccessTokenDuringLoginCreatesNoSession() throws Exception {
         Session session = newSession();
         Long userId = jdbc.queryForObject("select id from users where email = ?", Long.class, session.email());
-        doThrow(new IllegalStateException("signing failed")).when(jwtUtils).generateToken(session.email());
+        doThrow(new IllegalStateException("signing failed")).when(jwtUtils).generateToken(eq(session.email()), anyLong());
 
         assertThatThrownBy(() -> login(session.email(), PASSWORD)).hasRootCauseMessage("signing failed");
 

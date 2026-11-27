@@ -25,7 +25,7 @@ Endpoints (all under `/api/auth`):
 
 ### Generation
 
-`JwtUtils.generateToken(email)` builds a compact JWS with JJWT 0.12.x:
+`JwtUtils.generateToken(email, tokenVersion)` builds a compact JWS with JJWT 0.12.x:
 
 | Part | Name | Value |
 |---|---|---|
@@ -33,6 +33,7 @@ Endpoints (all under `/api/auth`):
 | Claim | `iss` | `campus-foodcourt` (`app.jwt.issuer`) |
 | Claim | `sub` | the user's email, lower-cased (the stable login identifier) |
 | Claim | `token_type` | `access` |
+| Claim | `token_version` | the user's `users.token_version` at issue time (see "Account status") |
 | Claim | `iat` | issue time |
 | Claim | `exp` | `iat` + 15 minutes (`app.jwt.expiration-ms`, default `900000`) |
 
@@ -41,8 +42,8 @@ deleted user or a changed role takes effect immediately, not after the token exp
 
 ### Validation
 
-`JwtUtils.extractVerifiedEmail(token)` is the only way the application reads a token. It uses one
-pre-built JJWT parser that:
+`JwtUtils.verify(token)` is the only way the application reads a token (`extractVerifiedEmail` is a
+shortcut for it). It uses one pre-built JJWT parser that:
 
 1. accepts **only HS256**. The parser's algorithm registry is reduced to HS256, so a token signed with
    the same key using HS384 or HS512 is refused. JWTs with `alg: none` and encrypted JWTs (JWE) are
@@ -52,9 +53,10 @@ pre-built JJWT parser that:
    tokens are issued and checked by the same process.
 4. requires `iss` = `campus-foodcourt` and `token_type` = `access`. A missing claim is rejected the same
    way as a wrong value.
-5. additionally requires `exp` and a non-blank `sub` to be present.
+5. additionally requires `exp`, a non-blank `sub` and a non-negative integer `token_version` to be present.
 
-If any check fails, `JwtAuthenticationFilter` leaves the request unauthenticated. Protected endpoints then
+`JwtAuthenticationFilter` then loads the user and also requires the account to be `ACTIVE` and the token's
+`token_version` to equal the user's current one. If any check fails, `JwtAuthenticationFilter` leaves the request unauthenticated. Protected endpoints then
 answer `401` with `WWW-Authenticate: Bearer`. The reason is logged at DEBUG level only.
 
 Tests: `JwtUtilsTest` (unit: valid token, wrong key, tampered payload, expiry, missing `exp`, wrong or
@@ -103,8 +105,8 @@ Rotating it logs every user out of their access token, but refresh tokens keep w
     A new access token is issued in the same transaction; if signing fails, the rotation is rolled back.
   - if the token was already `ROTATED` (a replay, for example a stolen copy), **reuse is detected**: every
     active token in the family is revoked with `REUSE_DETECTED` and a warning is logged.
-  - if the token is expired, unknown or revoked for any other reason, the answer is `401` and the cookie is
-    cleared.
+  - if the token is expired, unknown or revoked for any other reason (`LOGOUT`, `ACCOUNT_DEACTIVATED`), the
+    answer is `401` and the cookie is cleared, without a theft alert.
 - **`POST /logout`** revokes every active token in the presented token's family (`LOGOUT`) and clears the
   cookie. Access tokens that were already issued remain valid until they expire (at most 15 minutes).
 
@@ -118,6 +120,56 @@ The four cookie-based endpoints (register, login, refresh, logout) require a dou
 SPA calls `GET /api/auth/csrf`, receives the token in the body and in the readable, host-only
 `__Host-XSRF-TOKEN` cookie, and echoes it in the `X-XSRF-TOKEN` header. Bearer-authenticated endpoints do
 not need it, because browsers never attach `Authorization` headers automatically. Tests: `CsrfProtectionTest`.
+
+## Account status
+
+Every user has an `account_status` (V7 migration): `ACTIVE`, `SUSPENDED` or `DEACTIVATED`. It is `NOT NULL`,
+defaults to `ACTIVE` (existing users were migrated as `ACTIVE`) and is restricted by the check constraint
+`ck_users_account_status`. Registration always creates an `ACTIVE` user with `ROLE_USER`; clients cannot
+choose either value. Only `ACTIVE` accounts can authenticate:
+
+- **Login:** an inactive account gets the same `401 Invalid credentials` as a wrong password, after the same
+  BCrypt check, and receives no tokens.
+- **Access tokens:** the user is loaded from the database on every request, so an access token stops working
+  as soon as the account becomes inactive, without waiting for it to expire. The response is the same `401` as
+  for any invalid token.
+- **Refresh:** the status is checked after the token row is locked and before anything is written, so an
+  inactive account gets no successor. The response is the same `401` as for an invalid token, and the cookie
+  is cleared.
+- **Logout** works regardless of status, so an inactive user can still end their sessions.
+
+Statuses are changed only through `AccountStatusService.changeStatus` (internal; no HTTP endpoint yet):
+
+| Change to | Sessions (refresh-token families) | After returning to `ACTIVE` |
+|---|---|---|
+| `SUSPENDED` | Kept. Refresh is refused, but the tokens are not revoked. | Unexpired sessions resume. |
+| `DEACTIVATED` | Every active token of the user, in every family (all devices), is revoked with `ACCOUNT_DEACTIVATED` (V8 migration) by one bulk `UPDATE`, and `token_version` is incremented (V9), in the same transaction as the status change. This happens only on an actual transition to `DEACTIVATED`; repeating a deactivation changes nothing (no version increment, no revocation, existing revocation reasons kept). | Nothing is restored, neither refresh nor access tokens; the user must log in again. |
+| `ACTIVE` | Unchanged. | Not applicable. |
+
+**Concurrency.** The status change is an `UPDATE users …`, which row-locks the user (`FOR NO KEY UPDATE`
+level). For deactivation it is conditional (`… and account_status <> 'DEACTIVATED'`) and is followed, only if it
+matched, by the version increment and the bulk token revocation; a concurrent second deactivation waits for the
+row lock, re-checks the condition against the committed row and does nothing. Login, refresh and logout share-lock the same row
+(`SELECT … FOR SHARE`) before touching any token, and the two lock modes conflict, so they cannot interleave with a
+status change: either they finish first (and deactivation then revokes the token they created) or they run
+afterwards and see the new status. Session operations do not block each other. Every path locks the user row
+before token rows, so these locks cannot deadlock. Status checks and writes use database queries, never
+persistence-context state. The interleavings are tested deterministically in `AccountStatusConcurrencyTest`.
+
+**Access tokens after deactivation.** Access tokens are stateless, so revoking refresh tokens alone would not
+stop one issued before a deactivation from working again after a quick reactivation. Each user therefore has a
+`token_version` (V9 migration, `BIGINT NOT NULL DEFAULT 0`). Every access token carries the version current at
+issue time (read under the same user-row share lock as the status check), and the filter accepts a token only
+while it equals `users.token_version`. Deactivation increments the version in its transaction, so every earlier
+access token is invalid for good, including one issued by a login or refresh that finished just before the
+deactivation. Suspension does not change the version, so unexpired tokens resume after reactivation. A counter
+is used instead of a "valid after" timestamp because equality of integers has no clock-precision or
+equal-timestamp edge cases (JWT `iat` has only one-second precision). Tokens without `token_version` (issued
+before V9) are refused; clients then refresh. Tests: `AccessTokenInvalidationTest`,
+`AccessTokenVersionBoundaryTest`.
+
+Tests: `AccountStatusEnforcementTest`, `AccountStatusTransitionTest`, `AccountStatusConcurrencyTest`,
+`AccountStatusMigrationTest`.
 
 ## Authentication rate limiting
 

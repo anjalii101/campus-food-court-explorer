@@ -19,6 +19,8 @@ public class JwtUtils {
     public static final String TOKEN_TYPE_CLAIM = "token_type";
     /** The only token type this class issues or accepts. */
     public static final String ACCESS_TOKEN_TYPE = "access";
+    /** Claim holding the user's token version at issue time (users.token_version, V9 migration). */
+    public static final String TOKEN_VERSION_CLAIM = "token_version";
 
     private final SecretKey signingKey;
     private final String issuer;
@@ -43,28 +45,40 @@ public class JwtUtils {
                 .build();
     }
 
-    /** Issues a signed HS256 access token whose subject is the user's email. */
-    public String generateToken(String email) {
+    /**
+     * Issues a signed HS256 access token whose subject is the user's email. {@code tokenVersion} is the user's
+     * current users.token_version; the token is accepted only while that version is unchanged.
+     */
+    public String generateToken(String email, long tokenVersion) {
+        if (tokenVersion < 0) {
+            throw new IllegalArgumentException("tokenVersion must not be negative");
+        }
         Instant now = clock.instant();
         return Jwts.builder()
                 .issuer(issuer)
                 .subject(email)
                 .claim(TOKEN_TYPE_CLAIM, ACCESS_TOKEN_TYPE)
+                .claim(TOKEN_VERSION_CLAIM, tokenVersion)
                 .issuedAt(Date.from(now))
                 .expiration(Date.from(now.plusMillis(expirationMs)))
                 .signWith(signingKey, Jwts.SIG.HS256)
                 .compact();
     }
 
+    /** The verified contents the application uses: who the token is for and which token version it carries. */
+    public record VerifiedAccessToken(String email, long tokenVersion) {
+    }
+
     /**
-     * Verifies the token completely and returns its subject (the user's email).
-     * Signature, algorithm (HS256 only), expiry, issuer and token type are all checked.
+     * Verifies the token completely. Signature, algorithm (HS256 only), expiry, issuer and token type are checked,
+     * and subject, expiry and a non-negative integer token version must be present. Whether that version is still
+     * current is decided by the caller against the user's server-side state (JwtAuthenticationFilter).
      *
      * @throws JwtException             if the token is malformed, unsigned, signed with another key or algorithm,
-     *                                  expired, or carries the wrong issuer/token type or no subject/expiry
+     *                                  expired, or carries the wrong issuer/token type or no subject/expiry/version
      * @throws IllegalArgumentException if the token is null or empty
      */
-    public String extractVerifiedEmail(String token) {
+    public VerifiedAccessToken verify(String token) {
         Claims claims = parser.parseSignedClaims(token).getPayload();
         if (claims.getExpiration() == null) {
             throw new MalformedJwtException("Access token has no expiration");
@@ -73,6 +87,16 @@ public class JwtUtils {
         if (subject == null || subject.isBlank()) {
             throw new MalformedJwtException("Access token has no subject");
         }
-        return subject;
+        // Integer types only: a fractional or textual value is rejected rather than rounded.
+        Object version = claims.get(TOKEN_VERSION_CLAIM);
+        if (!(version instanceof Integer || version instanceof Long) || ((Number) version).longValue() < 0) {
+            throw new MalformedJwtException("Access token has no valid token version");
+        }
+        return new VerifiedAccessToken(subject, ((Number) version).longValue());
+    }
+
+    /** {@link #verify} and return only the subject (the user's email). */
+    public String extractVerifiedEmail(String token) {
+        return verify(token).email();
     }
 }

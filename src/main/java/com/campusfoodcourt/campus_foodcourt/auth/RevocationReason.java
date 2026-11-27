@@ -7,5 +7,7 @@ public enum RevocationReason {
     /** The session was ended by logout. */
     LOGOUT,
     /** A previously rotated token was presented again; the whole family was revoked. */
-    REUSE_DETECTED
+    REUSE_DETECTED,
+    /** The user's account was deactivated; every active session of the user was revoked (V8 migration). */
+    ACCOUNT_DEACTIVATED
 }

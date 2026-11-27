@@ -121,7 +121,9 @@ class JwtAccessTokenTest extends AbstractAuthApiTest {
 
     private static JwtBuilder claims(JwtBuilder builder, String subject, long issuedOffsetMs, long expiryOffsetMs) {
         long now = System.currentTimeMillis();
-        return builder.issuer("campus-foodcourt").claim("token_type", "access").subject(subject)
+        // token_version 0: the version of a newly registered user (see AccessTokenInvalidationTest).
+        return builder.issuer("campus-foodcourt").claim("token_type", "access").claim("token_version", 0)
+                .subject(subject)
                 .issuedAt(new Date(now + issuedOffsetMs))
                 .expiration(new Date(now + expiryOffsetMs));
     }

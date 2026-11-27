@@ -75,11 +75,14 @@ class SchemaMappingCompatibilityTest {
     void migrationsApplyCleanlyToAnEmptyDatabase() {
         assertThat(firstMigration.success).isTrue();
         assertThat(firstMigration.migrations).extracting(m -> m.version)
-                .containsExactly("1", "2", "3", "4", "5", "6");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9");
         assertThat(firstMigration.migrations).extracting(m -> m.filepath)
                 .anyMatch(p -> p.endsWith("V4__create_outlets.sql"))
                 .anyMatch(p -> p.endsWith("V5__create_dishes.sql"))
-                .anyMatch(p -> p.endsWith("V6__create_reviews.sql"));
+                .anyMatch(p -> p.endsWith("V6__create_reviews.sql"))
+                .anyMatch(p -> p.endsWith("V7__add_user_account_status.sql"))
+                .anyMatch(p -> p.endsWith("V8__add_account_deactivated_revocation_reason.sql"))
+                .anyMatch(p -> p.endsWith("V9__add_user_token_version.sql"));
     }
 
     @Test
