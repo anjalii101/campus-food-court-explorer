@@ -1,15 +1,17 @@
 package com.campusfoodcourt.campus_foodcourt.config;
 
 import com.campusfoodcourt.campus_foodcourt.auth.AuthProperties;
+import com.campusfoodcourt.campus_foodcourt.auth.ratelimit.AuthRateLimitFilter;
+import com.campusfoodcourt.campus_foodcourt.auth.ratelimit.AuthRateLimiter;
 import com.campusfoodcourt.campus_foodcourt.security.JwtAuthenticationFilter;
 import com.campusfoodcourt.campus_foodcourt.security.JwtUtils;
+import com.campusfoodcourt.campus_foodcourt.security.ProblemResponses;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -22,6 +24,7 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 import org.springframework.security.web.csrf.CsrfException;
+import org.springframework.security.web.csrf.CsrfFilter;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
 import org.springframework.security.web.util.matcher.OrRequestMatcher;
@@ -45,6 +48,10 @@ import java.io.IOException;
  *   <li>The refresh cookie is additionally {@code SameSite=Strict} and path-scoped to {@code /api/auth}
  *       as defence in depth.</li>
  * </ul>
+ *
+ * <h2>Rate limiting</h2>
+ * Login, register and refresh are limited per client address by {@link AuthRateLimitFilter}
+ * (in-memory, single instance; see docs/authentication.md).
  */
 @Configuration
 @EnableWebSecurity
@@ -65,7 +72,8 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http, JwtUtils jwtUtils,
                                                    UserDetailsService userDetailsService,
-                                                   AuthProperties authProperties) throws Exception {
+                                                   AuthProperties authProperties,
+                                                   AuthRateLimiter authRateLimiter) throws Exception {
         AuthProperties.Cookie cookie = authProperties.cookie();
 
         // __Host- prefix: browsers only accept it with Secure, Path=/ and no Domain, so a sibling subdomain
@@ -97,6 +105,9 @@ public class SecurityConfig {
                         })
                         .accessDeniedHandler((request, response, e) -> writeProblem(response, HttpStatus.FORBIDDEN,
                                 e instanceof CsrfException ? "Missing or invalid CSRF token" : "Access is denied")))
+                // Rate limiting runs before CSRF validation: every attempt counts, and a throttled request
+                // never reaches BCrypt, refresh-token rotation or the database.
+                .addFilterBefore(new AuthRateLimitFilter(authRateLimiter), CsrfFilter.class)
                 .addFilterBefore(new JwtAuthenticationFilter(jwtUtils, userDetailsService),
                         UsernamePasswordAuthenticationFilter.class);
         return http.build();
@@ -113,9 +124,6 @@ public class SecurityConfig {
 
     private static void writeProblem(HttpServletResponse response, HttpStatus status, String detail)
             throws IOException {
-        response.setStatus(status.value());
-        response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
-        response.getWriter().write("{\"type\":\"about:blank\",\"title\":\"" + status.getReasonPhrase()
-                + "\",\"status\":" + status.value() + ",\"detail\":\"" + detail + "\"}");
+        ProblemResponses.write(response, status, detail);
     }
 }

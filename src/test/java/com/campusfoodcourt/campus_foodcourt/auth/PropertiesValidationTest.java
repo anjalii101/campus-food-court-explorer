@@ -10,25 +10,36 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class PropertiesValidationTest {
 
+    private static final String ISSUER = "campus-foodcourt";
+
     @Test
     void acceptsBase64SecretOf32Bytes() {
         String secret = Base64.getEncoder().encodeToString(new byte[32]);
-        assertThatCode(() -> new JwtProperties(secret, 900_000)).doesNotThrowAnyException();
+        assertThatCode(() -> new JwtProperties(secret, 900_000, ISSUER)).doesNotThrowAnyException();
     }
 
     @Test
     void rejectsShortSecret() {
         String secret = Base64.getEncoder().encodeToString(new byte[31]);
-        assertThatThrownBy(() -> new JwtProperties(secret, 900_000))
+        assertThatThrownBy(() -> new JwtProperties(secret, 900_000, ISSUER))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("at least 32 bytes");
     }
 
     @Test
     void rejectsNonBase64Secret() {
-        assertThatThrownBy(() -> new JwtProperties("your_super_secret_key_here!", 900_000))
+        assertThatThrownBy(() -> new JwtProperties("your_super_secret_key_here!", 900_000, ISSUER))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Base64");
+    }
+
+    @Test
+    void decodedSecretIgnoresSurroundingWhitespaceExactlyLikeValidation() {
+        byte[] key = new byte[32];
+        java.util.Arrays.fill(key, (byte) 7);
+        String secret = "  " + Base64.getEncoder().encodeToString(key) + "\n";
+        JwtProperties properties = new JwtProperties(secret, 900_000, ISSUER);
+        org.assertj.core.api.Assertions.assertThat(properties.decodedSecret()).isEqualTo(key);
     }
 
     @Test

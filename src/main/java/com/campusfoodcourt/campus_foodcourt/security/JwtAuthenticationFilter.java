@@ -21,7 +21,7 @@ import java.io.IOException;
 
 /**
  * Authenticates requests carrying {@code Authorization: Bearer <access token>}.
- * Invalid, expired or unknown tokens leave the request unauthenticated; the security
+ * Invalid, expired, wrongly issued/typed or unknown-user tokens leave the request unauthenticated; the security
  * chain's entry point then answers 401 for protected endpoints.
  * <p>
  * Deliberately not a Spring bean, so it is registered only inside the security chain.
@@ -52,11 +52,9 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private void authenticate(String token, HttpServletRequest request) {
         try {
-            String email = jwtUtils.extractEmail(token);
+            // One full verification (signature, HS256, expiry, issuer, token type), then the user lookup.
+            String email = jwtUtils.extractVerifiedEmail(token);
             UserDetails user = userDetailsService.loadUserByUsername(email);
-            if (!jwtUtils.validateToken(token, user.getUsername())) {
-                return;
-            }
             UsernamePasswordAuthenticationToken authentication =
                     UsernamePasswordAuthenticationToken.authenticated(user, null, user.getAuthorities());
             authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));

@@ -28,7 +28,7 @@
 	</scm>
 	<properties>
 		<java.version>21</java.version>
-		<jjwt.version>0.11.5</jjwt.version>
+		<jjwt.version>0.12.7</jjwt.version>
 		<embedded-postgres.version>2.1.0</embedded-postgres.version>
 		<embedded-postgres-binaries.version>17.2.0</embedded-postgres-binaries.version>
 	</properties>
@@ -89,7 +89,8 @@
 			<artifactId>flyway-database-postgresql</artifactId>
 		</dependency>
 
-		<!-- JWT: 0.11.x keeps the API used by the existing JwtUtils and has no JAXB dependency (works on Java 21) -->
+		<!-- JWT: JJWT 0.12.x (all three artifacts must share one version). jjwt-impl and jjwt-jackson are
+		     runtime-only so application code can only compile against the stable jjwt-api. -->
 		<dependency>
 			<groupId>io.jsonwebtoken</groupId>
 			<artifactId>jjwt-api</artifactId>
